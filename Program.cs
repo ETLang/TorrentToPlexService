@@ -39,7 +39,7 @@ namespace TorrentToPlexService
             var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
 
             _7zPath = Path.Combine(programFiles, "7-zip", "7z.exe");
-            _FinishedTorrentFolder = @"C:\TorrentsCompleted"; // Path.Combine(myDocuments, "TorrentsCompleted");
+            _FinishedTorrentFolder = Path.Combine(myDocuments, "TorrentsCompleted");
             _PlexMediaRoot = Path.Combine(myVideos, "PlexMedia");
             _MoviesFolder = Path.Combine(_PlexMediaRoot, "Movies");
             _ShowsFolder = Path.Combine(_PlexMediaRoot, "Shows");
@@ -58,6 +58,9 @@ namespace TorrentToPlexService
                 Error("Can't Find completed torrents folder:\n" + _FinishedTorrentFolder);
                 return;
             }
+
+            Directory.CreateDirectory(_ShowsFolder);
+            Directory.CreateDirectory(_MoviesFolder);
 
             // find Plex Library updater
 
@@ -167,9 +170,6 @@ namespace TorrentToPlexService
                     else
                     {
                         Log($"Publishing {(isShow ? "Show" : "Movie")}:\n    " + file);
-
-                        Directory.CreateDirectory(_ShowsFolder);
-                        Directory.CreateDirectory(_MoviesFolder);
 
                         File.Copy(file, destination);
 
