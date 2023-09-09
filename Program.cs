@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Security.Policy;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
@@ -20,6 +21,8 @@ namespace TorrentToPlexService
         static string _MiscVideosFolder;
         static string _PlexLibraryUpdateUrl;
         static string _TempFolderBase;
+        static string _TorrentDropFolder;
+        static string _TorrentTrackerFolder;
 
         static string[] _VideoExtensions = new string[] { ".mp4", ".mpg", ".mpeg", ".mov", ".mkv", ".avi", ".webm" };
         static string[] _ZippedExtensions = new string[] { ".zip", ".7z", ".rar", ".tar.gz" };
@@ -31,6 +34,7 @@ namespace TorrentToPlexService
         static Regex _ShowRegex;
 
         static FileSystemWatcher _Watcher;
+        static FileSystemWatcher _TorrentDropWatcher;
 
         static void Main(string[] args)
         {
@@ -45,7 +49,8 @@ namespace TorrentToPlexService
             _ShowsFolder = Path.Combine(_PlexMediaRoot, "Shows");
             _MiscVideosFolder = Path.Combine(_PlexMediaRoot, "Other");
             _TempFolderBase = Path.Combine(_PlexMediaRoot, "Temp");
-
+            _TorrentDropFolder = Path.Combine(myDocuments, "TorrentDrop");
+            _TorrentTrackerFolder = Path.Combine(myDocuments, "TorrentFiles");
 
             if(!File.Exists(_7zPath))
             {
@@ -69,15 +74,23 @@ namespace TorrentToPlexService
             _ShowRegex = new Regex($@"(?<![a-z0-9])({string.Join("|", _ShowFilter)})(?![a-z0-9])", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
             _Watcher = new FileSystemWatcher(_FinishedTorrentFolder);
-
             _Watcher.EnableRaisingEvents = true;
-            //_Watcher.Created += (s,e) => OnTorrentCompleted(e.FullPath);
-            //_Watcher.Deleted += OnTorrentRemoved;
+
+            _TorrentDropWatcher = new FileSystemWatcher(_TorrentDropFolder);
+            _TorrentDropWatcher.Created += (s,e) => ProcessTorrentFile(e.FullPath);
+            _TorrentDropWatcher.EnableRaisingEvents = true;
 
             bool contentPublished = false;
 
+            foreach (var torrentFile in Directory.GetFiles(_TorrentDropFolder, "*.torrent"))
+                ProcessTorrentFile(torrentFile);
+
             foreach (var dir in Directory.GetDirectories(_FinishedTorrentFolder))
-                if (ProcessTorrent(dir))
+                if (ProcessTorrentFolder(dir))
+                    contentPublished = true;
+
+            foreach (var file in Directory.GetFiles(_FinishedTorrentFolder))
+                if (ProcessTorrentContentFile(file))
                     contentPublished = true;
 
             if(contentPublished)
@@ -93,6 +106,27 @@ namespace TorrentToPlexService
             }
         }
 
+        private static void ProcessTorrentFile(string path)
+        {
+            var ext = Path.GetExtension(path).ToLower();
+
+            if(ext == ".torrent")
+            {
+                var destPath = Path.Combine(_TorrentTrackerFolder, Path.GetFileName(path));
+
+                Log("New Torrent File Dropped:\n    " + path);
+                if(File.Exists(destPath))
+                {
+                    Log("Torrent File Already Processed:\n    " + path);
+                    return;
+                }
+
+                File.Move(path, destPath);
+
+                Process.Start(destPath);
+            }
+        }
+
         //private static void OnTorrentRemoved(object sender, FileSystemEventArgs e)
         //{
         //    throw new NotImplementedException();
@@ -100,17 +134,20 @@ namespace TorrentToPlexService
 
         private static void OnTorrentCompleted(string path)
         {
+            Log("Torrent Completed - " + Path.GetFileName(path));
             if(Directory.Exists(path))
             {
-                Log("Torrent Completed - " + Path.GetFileName(path));
-                if(ProcessTorrent(path))
+                if(ProcessTorrentFolder(path))
                 {
                     NotifyPlex();
                 }
             }
             else
             {
-                Log("File created in torrent folder:\n    " + path);
+                if(ProcessTorrentContentFile(path))
+                {
+                    NotifyPlex();
+                }
             }
         }
 
@@ -134,7 +171,7 @@ namespace TorrentToPlexService
             return output;
         }
 
-        static bool ProcessTorrent(string torrentFolder, bool isDefinitelyShow = false)
+        static bool ProcessTorrentFolder(string torrentFolder, bool isDefinitelyShow = false)
         {
             Log("Processing Torrent " + Path.GetFileName(torrentFolder));
 
@@ -142,68 +179,81 @@ namespace TorrentToPlexService
 
             foreach (var file in Directory.GetFiles(torrentFolder, "*", SearchOption.AllDirectories))
             {
-                if (IsSample(file))
-                {
-                    Log("Skipping Sample File:\n    " + file);
-                    continue;
-                }
-
-                var ext = Path.GetExtension(file).ToLower();
-
-                var isVideo = _VideoExtensions.Contains(ext);
-                var isZip = _ZippedExtensions.Contains(ext);
-                var isShow = isDefinitelyShow || IsShow(file);
-
-                if(isVideo)
-                {
-                    string destination;
-
-                    if(isShow)
-                        destination = Path.Combine(_ShowsFolder, Path.GetFileName(file));
-                    else
-                        destination = Path.Combine(_MoviesFolder, Path.GetFileName(file));
-
-                    if (File.Exists(destination))
-                    {
-                        Log($"Skipping {(isShow ? "Show" : "Movie")} Already Published:\n    " + file);
-                    }
-                    else
-                    {
-                        Log($"Publishing {(isShow ? "Show" : "Movie")}:\n    " + file);
-
-                        File.Copy(file, destination);
-
-                        published = true;
-                    }
-                }
-                
-                if(isZip)
-                {
-                    var tempFolder = CreateTempFolder();
-
-                    var pi = new ProcessStartInfo
-                    {
-                        //RedirectStandardError = true,
-                        //RedirectStandardInput = true,
-                        //RedirectStandardOutput = true,
-                        FileName = _7zPath,
-                        Arguments = $"x \"{file}\" -o\"{tempFolder}\"",
-                        UseShellExecute = false
-                    };
-
-                    Log("Unzipping:\n    " + file);
-                    Log("Destination:\n    " + tempFolder);
-                    var unzipProcess = Process.Start(pi);
-                    unzipProcess.WaitForExit();
-
-                    if (ProcessTorrent(tempFolder, isShow))
-                        published = true;
-
-                    Directory.Delete(tempFolder, true);
-                }
+                if (ProcessTorrentContentFile(file, isDefinitelyShow))
+                    published = true;
             }
 
             Log("Done Processing Torrent! " + (published ? "New Content Published!" : "No New Content"));
+            return published;
+        }
+
+        static bool ProcessTorrentContentFile(string file, bool isDefinitelyShow = false)
+        {
+            bool published = false;
+
+            if (IsSample(file))
+            {
+                Log("Skipping Sample File:\n    " + file);
+                return false;
+            }
+
+            var ext = Path.GetExtension(file).ToLower();
+
+            var isVideo = _VideoExtensions.Contains(ext);
+            var isZip = _ZippedExtensions.Contains(ext);
+            var isShow = isDefinitelyShow || IsShow(file);
+
+            if (isVideo)
+            {
+                string destination;
+
+                if (isShow)
+                    destination = Path.Combine(_ShowsFolder, Path.GetFileName(file));
+                else
+                    destination = Path.Combine(_MoviesFolder, Path.GetFileName(file));
+
+                var meta = destination + ".meta";
+
+                if (File.Exists(meta))
+                {
+                    Log($"Skipping {(isShow ? "Show" : "Movie")} Already Published:\n    " + file);
+                }
+                else
+                {
+                    Log($"Publishing {(isShow ? "Show" : "Movie")}:\n    " + file);
+
+                    File.Copy(file, destination, true);
+                    File.WriteAllText(meta, ".");
+
+                    published = true;
+                }
+            }
+
+            if (isZip)
+            {
+                var tempFolder = CreateTempFolder();
+
+                var pi = new ProcessStartInfo
+                {
+                    //RedirectStandardError = true,
+                    //RedirectStandardInput = true,
+                    //RedirectStandardOutput = true,
+                    FileName = _7zPath,
+                    Arguments = $"x \"{file}\" -o\"{tempFolder}\"",
+                    UseShellExecute = false
+                };
+
+                Log("Unzipping:\n    " + file);
+                Log("Destination:\n    " + tempFolder);
+                var unzipProcess = Process.Start(pi);
+                unzipProcess.WaitForExit();
+
+                if (ProcessTorrentFolder(tempFolder, isShow))
+                    published = true;
+
+                Directory.Delete(tempFolder, true);
+            }
+
             return published;
         }
 
